@@ -27,17 +27,20 @@ def filter_recent_tokens(data, hours=1):
                 # Parse the ISO format datetime string (already UTC)
                 listed_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
                 if listed_time > cutoff_time:
-                    # Handle daily volume that might be None
-                    daily_volume = token.get('daily_volume')
-                    if daily_volume is None:
-                        daily_volume = 0
-                    
                     recent_tokens.append({
-                        'address': token.get('address', 'N/A'),
-                        'symbol': token.get('symbol', 'N/A'),
-                        'name': token.get('name', 'N/A'),
-                        'created_at': listed_time.strftime('%Y-%m-%d %H:%M:%S UTC'),
-                        'daily_volume': daily_volume
+                        'address': token.get('address'),
+                        'name': token.get('name'),
+                        'symbol': token.get('symbol'),
+                        'decimals': token.get('decimals'),
+                        'logoURI': token.get('logoURI'),
+                        'tags': token.get('tags', []),
+                        'daily_volume': token.get('daily_volume'),
+                        'created_at': token.get('created_at'),
+                        'freeze_authority': token.get('freeze_authority'),
+                        'mint_authority': token.get('mint_authority'),
+                        'permanent_delegate': token.get('permanent_delegate'),
+                        'minted_at': token.get('minted_at'),
+                        'extensions': token.get('extensions', {})
                     })
             except ValueError as e:
                 print(f"Error parsing date for token {token.get('symbol')}: {e}")
@@ -101,6 +104,11 @@ def main():
     
     if data:
         print("Successfully fetched data!")
+        
+        # Print raw data for first token
+        print("\nExample of raw token data from API:")
+        print(json.dumps(data[0], indent=2))
+        
         recent_tokens = filter_recent_tokens(data, hours=token_age)
         
         if recent_tokens:
