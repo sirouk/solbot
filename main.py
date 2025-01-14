@@ -271,7 +271,7 @@ async def handle_trojan_response(event, current_mint):
     
     # Check if response indicates success
     is_success = any(x in response.lower() for x in [
-        "Buy Success",
+        "buy success",
     ])
     
     if current_mint:
