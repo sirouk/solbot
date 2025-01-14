@@ -241,13 +241,37 @@ async def handle_trojan_response(event, current_mint):
     print(f"\nTrojan Bot Response for {current_mint}:")
     print(response)
     
+    # Check if response indicates a transaction was sent
+    if "Transaction sent" in response:
+        # Wait for message edit with transaction result
+        try:
+            # Wait up to 60 seconds for transaction confirmation
+            for _ in range(12):  # 12 * 5 seconds = 60 seconds total
+                await asyncio.sleep(5)
+                # Get the updated message
+                message = await event.client.get_messages(event.chat_id, ids=[event.message.id])
+                if message and message[0].text != response:
+                    # Message was edited, process the new response
+                    response = message[0].text
+                    print(f"\nUpdated Trojan Bot Response:")
+                    print(response)
+                    break
+        except Exception as e:
+            print(f"Error checking transaction status: {e}")
+    
     # Check if response indicates a failure
     is_failure = any(x in response.lower() for x in [
         "insufficient balance",
         "error",
         "failed",
         "🔴",
-        "token not found"
+        "token not found",
+        "transaction failed"
+    ])
+    
+    # Check if response indicates success
+    is_success = any(x in response.lower() for x in [
+        "Buy Success",
     ])
     
     if current_mint:
@@ -276,7 +300,7 @@ async def handle_trojan_response(event, current_mint):
                         f"Last error: {response}"
                     )
                     await send_personal_message(event.client, failure_msg)
-            else:
+            elif is_success:
                 # Success - mark as bought
                 cursor.execute('''
                 UPDATE verified_tokens 
@@ -284,6 +308,12 @@ async def handle_trojan_response(event, current_mint):
                     date_bought = ?
                 WHERE mint = ?
                 ''', (datetime.now(), current_mint))
+                
+                success_msg = (
+                    f"🎉 Successfully purchased token!\n"
+                    f"Mint: {current_mint}"
+                )
+                await send_personal_message(event.client, success_msg)
             
             conn.commit()
         finally:
