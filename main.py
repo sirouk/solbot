@@ -1,12 +1,13 @@
 import asyncio
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 from telethon import TelegramClient, events
 from dotenv import load_dotenv
 import os
 import re
 import argparse
+import pytz
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Solana Token Monitor')
@@ -95,16 +96,38 @@ async def send_personal_message(client, message):
         print(f"Message that failed to send: {message}")
 
 def fetch_verified_tokens():
-    """Fetch tokens from the API"""
+    """Fetch tokens from the Jupiter API and filter by age"""
     try:
-        response = requests.get("https://api.rugcheck.xyz/v1/stats/verified")
+        response = requests.get("https://tokens.jup.ag/tokens?tags=verified")
         response.raise_for_status()
         tokens = response.json()
-        print(f"\nFetched {len(tokens)} tokens from API")
-        # Print verified tokens count
-        verified_tokens = [t for t in tokens if t.get('jup_verified', False)]
-        print(f"Found {len(verified_tokens)} Jupiter verified tokens")
-        return tokens
+        
+        # Get configured token age
+        token_age = float(os.getenv('TOKEN_AGE_HOURS', '1'))
+        cutoff_time = datetime.now(pytz.UTC) - timedelta(hours=token_age)
+        
+        # Convert the response to match our expected format and filter by age
+        formatted_tokens = []
+        for token in tokens:
+            created_at = token.get('created_at')
+            if created_at:
+                try:
+                    created_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    if created_time > cutoff_time:
+                        formatted_tokens.append({
+                            'mint': token['address'],
+                            'name': token.get('name', ''),
+                            'symbol': token.get('symbol', ''),
+                            'description': '',  # Jupiter API doesn't provide description
+                            'jup_verified': True,  # All tokens from this endpoint are verified
+                            'created_at': created_time,
+                            'daily_volume': token.get('daily_volume', 0)
+                        })
+                except ValueError:
+                    continue
+        
+        print(f"\nFetched {len(formatted_tokens)} recent tokens from Jupiter API (last {token_age} hours)")
+        return formatted_tokens
     except Exception as e:
         print(f"Error fetching tokens: {e}")
         return []
@@ -117,48 +140,78 @@ def process_tokens(tokens):
     new_verified_tokens = []
     status_changes = []
     
+    # Get configured token age for cleanup
+    token_age = float(os.getenv('TOKEN_AGE_HOURS', '1'))
+    cutoff_time = datetime.now(pytz.UTC) - timedelta(hours=token_age)
+    
+    # Clean up old tokens that were never bought
+    cursor.execute('''
+    DELETE FROM verified_tokens 
+    WHERE is_bought = FALSE 
+    AND date_added < ? 
+    AND retry_count >= 3
+    ''', (cutoff_time,))
+    
     for token in tokens:
         mint = token['mint']
         is_verified = token.get('jup_verified', False)
+        created_at = token['created_at']
         
-        # Check if token exists
-        cursor.execute('SELECT jup_verified, is_bought, retry_count FROM verified_tokens WHERE mint = ?', (mint,))
-        result = cursor.fetchone()
-        
-        if result is None:
-            # New token
-            if is_verified:
-                new_verified_tokens.append(token)
+        # Only process tokens within our monitoring window
+        if created_at > cutoff_time:
+            # Check if token exists
+            cursor.execute('SELECT jup_verified, is_bought, retry_count FROM verified_tokens WHERE mint = ?', (mint,))
+            result = cursor.fetchone()
             
-            cursor.execute('''
-            INSERT INTO verified_tokens 
-            (mint, name, symbol, description, jup_verified, date_added, retry_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                mint,
-                token.get('name', ''),
-                token.get('symbol', ''),
-                token.get('description', ''),
-                is_verified,
-                datetime.now(),
-                0
-            ))
-        else:
-            old_status, is_bought, retry_count = result
-            
-            if old_status != is_verified:
-                status_changes.append({
-                    'mint': mint,
-                    'name': token.get('name', ''),
-                    'old_status': old_status,
-                    'new_status': is_verified
-                })
+            if result is None:
+                # New token
+                if is_verified:
+                    new_verified_tokens.append(token)
+                    # Format message for new token notification
+                    volume_str = f"${token['daily_volume']:,.2f}" if token.get('daily_volume') else "No volume data"
+                    created_at_str = token['created_at'].strftime('%Y-%m-%d %H:%M:%S UTC')
+                    token['notification_msg'] = (
+                        f"🆕 New Token Listed!\n"
+                        f"Symbol: {token.get('symbol', 'N/A')}\n"
+                        f"Name: {token.get('name', 'N/A')}\n"
+                        f"Address: {mint}\n"
+                        f"Listed: {created_at_str}\n"
+                        f"Daily Volume: {volume_str}"
+                    )
                 
                 cursor.execute('''
-                UPDATE verified_tokens 
-                SET jup_verified = ?
-                WHERE mint = ?
-                ''', (is_verified, mint))
+                INSERT INTO verified_tokens 
+                (mint, name, symbol, description, jup_verified, date_added, retry_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    mint,
+                    token.get('name', ''),
+                    token.get('symbol', ''),
+                    token.get('description', ''),
+                    is_verified,
+                    token['created_at'],
+                    0
+                ))
+            else:
+                old_status, is_bought, retry_count = result
+                
+                if old_status != is_verified:
+                    status_changes.append({
+                        'mint': mint,
+                        'name': token.get('name', ''),
+                        'old_status': old_status,
+                        'new_status': is_verified
+                    })
+                    
+                    cursor.execute('''
+                    UPDATE verified_tokens 
+                    SET jup_verified = ?
+                    WHERE mint = ?
+                    ''', (is_verified, mint))
+    
+    # Print cleanup stats
+    if cursor.rowcount > 0:
+        print(f"\nCleaned up {cursor.rowcount} old unbought tokens from database")
     
     conn.commit()
     conn.close()
@@ -168,6 +221,14 @@ def setup_environment(auto=False):
     """Interactive setup for first-time users"""
     print("\n=== Welcome to the Solana Token Monitor Setup ===")
     print("\nLet's get you set up with everything you need!\n")
+
+    # Load current values if they exist
+    load_dotenv()
+    current_api_id = os.getenv('TELEGRAM_API_ID', '')
+    current_api_hash = os.getenv('TELEGRAM_API_HASH', '')
+    current_phone = os.getenv('TELEGRAM_PHONE', '')
+    current_channel_id = os.getenv('RECIPIENT_IDS', '')
+    current_token_age = os.getenv('TOKEN_AGE_HOURS', '1')
 
     # Check if .env exists
     if os.path.exists('.env'):
@@ -183,10 +244,22 @@ def setup_environment(auto=False):
     print("2. Log in with your phone number")
     print("3. Create a new application if you haven't already")
     print("\nOnce you have that ready, enter the following information:")
+    print("(Press Enter to keep current value)")
 
-    api_id = input("Enter your API ID: ").strip()
-    api_hash = input("Enter your API Hash: ").strip()
-    phone = input("Enter your phone number (with country code, e.g., +1234567890): ").strip()
+    api_id_prompt = f" [current: {current_api_id}]: " if current_api_id else ": "
+    api_id = input(f"Enter your API ID{api_id_prompt}").strip()
+    if not api_id and current_api_id:
+        api_id = current_api_id
+
+    api_hash_prompt = f" [current: {current_api_hash}]: " if current_api_hash else ": "
+    api_hash = input(f"Enter your API Hash{api_hash_prompt}").strip()
+    if not api_hash and current_api_hash:
+        api_hash = current_api_hash
+
+    phone_prompt = f" [current: {current_phone}]: " if current_phone else " (with country code, e.g., +1234567890): "
+    phone = input(f"Enter your phone number{phone_prompt}").strip()
+    if not phone and current_phone:
+        phone = current_phone
 
     print("\nStep 2: Telegram Channel Setup")
     print("Now, let's set up your notification channel:")
@@ -195,10 +268,30 @@ def setup_environment(auto=False):
     print("3. Forward any message from there to @userinfobot")
     print("4. Copy the ID number it gives you")
     
-    channel_id = input("\nEnter your Telegram chat ID: ").strip()
+    channel_id_prompt = f" [current: {current_channel_id}]: " if current_channel_id else ": "
+    channel_id = input(f"\nEnter your Telegram chat ID{channel_id_prompt}").strip()
+    if not channel_id and current_channel_id:
+        channel_id = current_channel_id
     
     # Clean up the channel ID (remove any URL parts if they paste the full URL)
     channel_id = re.sub(r'.*#', '', channel_id)
+
+    print("\nStep 3: Token Age Configuration")
+    while True:
+        try:
+            age_prompt = f" [current: {current_token_age} hours]: " if current_token_age else " (default 1): "
+            age_input = input(f"\nEnter the maximum age of tokens to monitor{age_prompt}").strip()
+            if not age_input:
+                token_age = current_token_age if current_token_age else "1"
+                break
+            token_age = float(age_input)
+            if token_age <= 0:
+                print("Please enter a positive number")
+                continue
+            token_age = str(token_age)
+            break
+        except ValueError:
+            print("Please enter a valid number")
 
     # Create .env file
     with open('.env', 'w') as f:
@@ -206,8 +299,9 @@ def setup_environment(auto=False):
         f.write(f'TELEGRAM_API_HASH={api_hash}\n')
         f.write(f'TELEGRAM_PHONE={phone}\n')
         f.write(f'RECIPIENT_IDS={channel_id}\n')
+        f.write(f'TOKEN_AGE_HOURS={token_age}\n')
 
-    print("\nStep 3: Verification")
+    print("\nStep 4: Verification")
     print("Let's verify your setup...")
     
     # Load the new environment variables
@@ -223,7 +317,7 @@ def setup_environment(auto=False):
 
     print("\n=== Setup Complete! ===")
     print("\nYour configuration has been saved. The script will now:")
-    print("1. Monitor for new Jupiter-verified tokens")
+    print(f"1. Monitor for new Jupiter-verified tokens (up to {token_age} hours old)")
     print("2. Attempt to purchase them through the Trojan bot")
     print("3. Send status updates to your saved messages")
     print("\nWould you like to start the monitor now? (y/n)")
@@ -328,7 +422,8 @@ async def main(auto=False):
         os.getenv('TELEGRAM_API_ID'),
         os.getenv('TELEGRAM_API_HASH'),
         os.getenv('TELEGRAM_PHONE'),
-        os.getenv('RECIPIENT_IDS')
+        os.getenv('RECIPIENT_IDS'),
+        os.getenv('TOKEN_AGE_HOURS')
     ]):
         if not setup_environment(auto):
             print("\nSetup incomplete. Please run the script again when ready.")
@@ -342,6 +437,7 @@ async def main(auto=False):
     API_HASH = os.getenv('TELEGRAM_API_HASH')
     PHONE_NUMBER = os.getenv('TELEGRAM_PHONE')
     MY_TELEGRAM_ID = os.getenv('RECIPIENT_IDS').split(',')[0]
+    TOKEN_AGE = os.getenv('TOKEN_AGE_HOURS', '1')
 
     create_database()
     
@@ -355,7 +451,7 @@ async def main(auto=False):
         if not await verify_telegram_connection(client):
             return
         
-        print("\nStarting main loop - monitoring for new verified tokens...")
+        print(f"\nStarting main loop - monitoring for new verified tokens (last {TOKEN_AGE} hours)...")
         
         while True:
             try:
@@ -363,6 +459,11 @@ async def main(auto=False):
                 
                 if tokens:
                     new_verified_tokens, status_changes = process_tokens(tokens)
+                    
+                    # Notify about new tokens
+                    for token in new_verified_tokens:
+                        if hasattr(token, 'notification_msg'):
+                            await send_personal_message(client, token['notification_msg'])
                     
                     # Get tokens that need processing (new or retry)
                     conn = sqlite3.connect('tokens.db')

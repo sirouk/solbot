@@ -41,3 +41,4 @@ ENV/
 .vscode/
 *.swp
 *.swo
+recent_tokens_*.json
