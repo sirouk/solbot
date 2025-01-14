@@ -74,8 +74,7 @@ def parse_args():
     parser.add_argument('--age', type=float, help='Age in hours to filter tokens')
     return parser.parse_args()
 
-# Example usage
-if __name__ == "__main__":
+def main():
     args = parse_args()
     
     # Determine token age
@@ -118,4 +117,7 @@ if __name__ == "__main__":
             filename = f"recent_tokens_{timestamp}.json"
             save_json_data(recent_tokens, filename)
         else:
-            print(f"\nNo new tokens found in the last {token_age} hour{'s' if token_age != 1 else ''}.") 
+            print(f"\nNo new tokens found in the last {token_age} hour{'s' if token_age != 1 else ''}.")
+
+if __name__ == "__main__":
+    main() 
