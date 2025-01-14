@@ -1,0 +1,16 @@
+[project]
+name = "solbot"
+version = "0.1.0"
+description = "A Python bot that monitors for new Jupiter-verified tokens on Solana"
+requires-python = ">=3.11"
+dependencies = [
+    "requests==2.31.0",
+    "python-telegram-bot==20.8",
+    "aiosqlite==0.19.0",
+    "python-dotenv==1.0.0",
+    "telethon"
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta" 
