@@ -98,33 +98,58 @@ async def send_personal_message(client, message):
 def fetch_verified_tokens():
     """Fetch tokens from the Jupiter API and filter by age"""
     try:
-        response = requests.get("https://tokens.jup.ag/tokens?tags=verified")
+        api_url = "https://tokens.jup.ag/tokens?tags=verified,community,strict,lst,birdeye-trending,clone,pump"
+        response = requests.get(api_url)
         response.raise_for_status()
         tokens = response.json()
         
-        # Get configured token age
+        # Get configured token age and ensure cutoff is in UTC
         token_age = float(os.getenv('TOKEN_AGE_HOURS', '1'))
-        cutoff_time = datetime.now(pytz.UTC) - timedelta(hours=token_age)
+        current_time = datetime.now(pytz.UTC)
+        cutoff_time = current_time - timedelta(hours=token_age)
         
-        # Convert the response to match our expected format and filter by age
         formatted_tokens = []
         for token in tokens:
             created_at = token.get('created_at')
-            if created_at:
+            minted_at = token.get('minted_at')
+            
+            # Only process tokens that have both dates and meet our criteria
+            if created_at and minted_at and (
+                token.get('freeze_authority') is None and
+                token.get('mint_authority') is None and
+                token.get('permanent_delegate') is None and
+                not token.get('extensions')
+            ):
                 try:
                     created_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                    if created_time > cutoff_time:
+                    minted_time = datetime.fromisoformat(minted_at.replace('Z', '+00:00'))
+                    
+                    
+                    # Use minted_time for age filtering instead of created_time
+                    if minted_time > cutoff_time:
                         formatted_tokens.append({
                             'mint': token['address'],
                             'name': token.get('name', ''),
                             'symbol': token.get('symbol', ''),
-                            'description': '',  # Jupiter API doesn't provide description
-                            'jup_verified': True,  # All tokens from this endpoint are verified
+                            'description': '',
+                            'jup_verified': True,
                             'created_at': created_time,
-                            'daily_volume': token.get('daily_volume', 0)
+                            'minted_at': minted_time,
+                            'daily_volume': token.get('daily_volume', 0),
+                            'time_diff_seconds': (created_time - minted_time).total_seconds()
                         })
                 except ValueError:
                     continue
+        
+        # Calculate and print time difference statistics
+        if formatted_tokens:
+            time_diffs = [t['time_diff_seconds'] for t in formatted_tokens]
+            avg_diff = sum(time_diffs) / len(time_diffs)
+            print(f"\nAnalysis of minted vs created times:")
+            print(f"Number of tokens with both dates: {len(time_diffs)}")
+            print(f"Average time difference: {avg_diff:.2f} seconds ({avg_diff/60:.2f} minutes)")
+            print(f"Min difference: {min(time_diffs):.2f} seconds")
+            print(f"Max difference: {max(time_diffs):.2f} seconds")
         
         print(f"\nFetched {len(formatted_tokens)} recent tokens from Jupiter API (last {token_age} hours)")
         return formatted_tokens
@@ -136,6 +161,14 @@ def process_tokens(tokens):
     """Process tokens and return new verified tokens and status changes"""
     conn = sqlite3.connect('tokens.db')
     cursor = conn.cursor()
+    
+    # Add minted_at column if it doesn't exist
+    try:
+        cursor.execute('ALTER TABLE verified_tokens ADD COLUMN minted_at TIMESTAMP NULL')
+        print("Added minted_at column to verified_tokens table")
+    except sqlite3.OperationalError:
+        # Column already exists
+        pass
     
     new_verified_tokens = []
     status_changes = []
@@ -170,19 +203,21 @@ def process_tokens(tokens):
                     # Format message for new token notification
                     volume_str = f"${token['daily_volume']:,.2f}" if token.get('daily_volume') else "No volume data"
                     created_at_str = token['created_at'].strftime('%Y-%m-%d %H:%M:%S UTC')
+                    minted_at_str = token['minted_at'].strftime('%Y-%m-%d %H:%M:%S UTC')
                     token['notification_msg'] = (
                         f"🆕 New Token Listed!\n"
                         f"Symbol: {token.get('symbol', 'N/A')}\n"
                         f"Name: {token.get('name', 'N/A')}\n"
                         f"Address: {mint}\n"
                         f"Listed: {created_at_str}\n"
+                        f"Minted: {minted_at_str}\n"
                         f"Daily Volume: {volume_str}"
                     )
                 
                 cursor.execute('''
                 INSERT INTO verified_tokens 
-                (mint, name, symbol, description, jup_verified, date_added, retry_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (mint, name, symbol, description, jup_verified, date_added, retry_count, minted_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     mint,
                     token.get('name', ''),
@@ -190,7 +225,8 @@ def process_tokens(tokens):
                     token.get('description', ''),
                     is_verified,
                     token['created_at'],
-                    0
+                    0,
+                    token['minted_at']  # New field
                 ))
             else:
                 old_status, is_bought, retry_count = result

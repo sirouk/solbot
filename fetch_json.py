@@ -19,28 +19,44 @@ def filter_recent_tokens(data, hours=1):
     cutoff_time = current_time - timedelta(hours=hours)
     
     recent_tokens = []
+    time_differences = []  # Store time differences
+    
     for token in data:
-        # Check if the token has a 'created_at' field
+        # Check if token meets all our criteria:
+        # 1. Has minted_at date
+        # 2. No authorities set
+        # 3. Empty extensions
+        # 4. Within time window
+        minted_at = token.get('minted_at')
         created_at = token.get('created_at')
-        if created_at:
+        
+        if (minted_at and created_at and
+            token.get('freeze_authority') is None and
+            token.get('mint_authority') is None and
+            token.get('permanent_delegate') is None and
+            not token.get('extensions')):  # Empty extensions
+            
             try:
-                # Parse the ISO format datetime string (already UTC)
-                listed_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                if listed_time > cutoff_time:
+                created_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                minted_time = datetime.fromisoformat(minted_at.replace('Z', '+00:00'))
+                
+                # Calculate time difference
+                time_diff = (created_time - minted_time).total_seconds()
+                time_differences.append(time_diff)
+                
+                # Only include if minted within our time window
+                if minted_time > cutoff_time:
                     recent_tokens.append({
                         'address': token.get('address'),
-                        'name': token.get('name'),
-                        'symbol': token.get('symbol'),
+                        'name': token.get('name', ''),
+                        'symbol': token.get('symbol', ''),
                         'decimals': token.get('decimals'),
                         'logoURI': token.get('logoURI'),
                         'tags': token.get('tags', []),
                         'daily_volume': token.get('daily_volume'),
-                        'created_at': token.get('created_at'),
-                        'freeze_authority': token.get('freeze_authority'),
-                        'mint_authority': token.get('mint_authority'),
-                        'permanent_delegate': token.get('permanent_delegate'),
-                        'minted_at': token.get('minted_at'),
-                        'extensions': token.get('extensions', {})
+                        'created_at': created_at,
+                        'minted_at': minted_at,
+                        'time_diff_seconds': time_diff
                     })
             except ValueError as e:
                 print(f"Error parsing date for token {token.get('symbol')}: {e}")
@@ -48,11 +64,21 @@ def filter_recent_tokens(data, hours=1):
     
     # Sort by created_at date, newest first
     recent_tokens.sort(key=lambda x: x['created_at'], reverse=True)
+    
+    # Print time difference statistics
+    if time_differences:
+        avg_diff = sum(time_differences) / len(time_differences)
+        print(f"\nAnalysis of minted vs created times:")
+        print(f"Number of tokens with both dates: {len(time_differences)}")
+        print(f"Average time difference: {avg_diff:.2f} seconds ({avg_diff/60:.2f} minutes)")
+        print(f"Min difference: {min(time_differences):.2f} seconds")
+        print(f"Max difference: {max(time_differences):.2f} seconds")
+    
     return recent_tokens
 
 def format_volume(volume):
-    """Format volume with appropriate suffix (K, M, B) or 'No volume' if 0"""
-    if volume == 0:
+    """Format volume with appropriate suffix (K, M, B) or 'No volume' if None or 0"""
+    if volume is None or volume == 0:
         return "No volume data"
     elif volume < 1000:
         return f"${volume:.2f}"
@@ -98,8 +124,8 @@ def main():
                 print("Please enter a valid number")
     elif token_age is None:
         token_age = 1
-
-    api_url = "https://tokens.jup.ag/tokens?tags=verified"
+    # verified,unknown,community,strict,lst,birdeye-trending,clone,
+    api_url = "https://tokens.jup.ag/tokens?tags=verified,community,strict,lst,birdeye-trending,clone,pump"
     data = fetch_json_data(api_url)
     
     if data:
@@ -121,7 +147,7 @@ def main():
                 print(f"Daily Volume: {format_volume(token['daily_volume'])}")
             
             # Save to file
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now(pytz.UTC).strftime("%Y%m%d_%H%M%S")
             filename = f"recent_tokens_{timestamp}.json"
             save_json_data(recent_tokens, filename)
         else:
