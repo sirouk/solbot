@@ -8,6 +8,7 @@ import os
 import re
 import argparse
 import pytz
+import logging
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Solana Token Monitor')
@@ -68,13 +69,13 @@ def log_communication(mint, message_type, message_content):
 async def verify_telegram_connection(client):
     """Test Telegram connection by sending a help command to Trojan bot"""
     try:
-        print("Testing Telegram connection...")
+        logger.info("Testing Telegram connection...")
         await client.send_message('solana_trojanbot', '/help')
         log_communication(None, 'sent', '/help')
-        print("Successfully connected to Telegram and Trojan bot!")
+        logger.info("Successfully connected to Telegram and Trojan bot!")
         return True
     except Exception as e:
-        print(f"Error connecting to Telegram: {e}")
+        logger.error(f"Error connecting to Telegram: {e}")
         return False
 
 async def send_personal_message(client, message):
@@ -92,8 +93,8 @@ async def send_personal_message(client, message):
             await client.send_message(chat_id, message)
             
     except Exception as e:
-        print(f"Error sending message to saved chat: {e}")
-        print(f"Message that failed to send: {message}")
+        logger.error(f"Error sending message to saved chat: {e}")
+        logger.error(f"Message that failed to send: {message}")
 
 def fetch_verified_tokens():
     """Fetch tokens from the Jupiter API and filter by age"""
@@ -145,16 +146,16 @@ def fetch_verified_tokens():
         if formatted_tokens:
             time_diffs = [t['time_diff_seconds'] for t in formatted_tokens]
             avg_diff = sum(time_diffs) / len(time_diffs)
-            print(f"\nAnalysis of minted vs created times:")
-            print(f"Number of tokens with both dates: {len(time_diffs)}")
-            print(f"Average time difference: {avg_diff:.2f} seconds ({avg_diff/60:.2f} minutes)")
-            print(f"Min difference: {min(time_diffs):.2f} seconds")
-            print(f"Max difference: {max(time_diffs):.2f} seconds")
+            logger.info("\nAnalysis of minted vs created times:")
+            logger.info(f"Number of tokens with both dates: {len(time_diffs)}")
+            logger.info(f"Average time difference: {avg_diff:.2f} seconds ({avg_diff/60:.2f} minutes)")
+            logger.info(f"Min difference: {min(time_diffs):.2f} seconds")
+            logger.info(f"Max difference: {max(time_diffs):.2f} seconds")
         
-        print(f"\nFetched {len(formatted_tokens)} recent tokens from Jupiter API (last {token_age} hours)")
+        logger.info(f"Fetched {len(formatted_tokens)} recent tokens from Jupiter API (last {token_age} hours)")
         return formatted_tokens
     except Exception as e:
-        print(f"Error fetching tokens: {e}")
+        logger.error(f"Error fetching tokens: {e}")
         return []
 
 def process_tokens(tokens):
@@ -329,6 +330,23 @@ def setup_environment(auto=False):
         except ValueError:
             print("Please enter a valid number")
 
+    print("\nStep 4: Wait Time Configuration")
+    while True:
+        try:
+            wait_time_prompt = f" [current: {os.getenv('WAIT_SECONDS', '5')} seconds]: " if os.getenv('WAIT_SECONDS') else " (default 5): "
+            wait_input = input(f"\nEnter the base wait time in seconds{wait_time_prompt}").strip()
+            if not wait_input:
+                wait_time = os.getenv('WAIT_SECONDS', '5')
+                break
+            wait_time = float(wait_input)
+            if wait_time <= 0:
+                print("Please enter a positive number")
+                continue
+            wait_time = str(wait_time)
+            break
+        except ValueError:
+            print("Please enter a valid number")
+
     # Create .env file
     with open('.env', 'w') as f:
         f.write(f'TELEGRAM_API_ID={api_id}\n')
@@ -336,8 +354,9 @@ def setup_environment(auto=False):
         f.write(f'TELEGRAM_PHONE={phone}\n')
         f.write(f'RECIPIENT_IDS={channel_id}\n')
         f.write(f'TOKEN_AGE_HOURS={token_age}\n')
+        f.write(f'WAIT_SECONDS={wait_time}\n')
 
-    print("\nStep 4: Verification")
+    print("\nStep 5: Verification")
     print("Let's verify your setup...")
     
     # Load the new environment variables
@@ -421,7 +440,7 @@ async def handle_trojan_response(event, current_mint):
                 # Check if we've hit max retries
                 cursor.execute('SELECT retry_count FROM verified_tokens WHERE mint = ?', (current_mint,))
                 retry_count = cursor.fetchone()[0]
-                print(f"Current retry count for {current_mint}: {retry_count}")
+                logger.warning(f"Current retry count for {current_mint}: {retry_count}")
                 
                 if retry_count >= 3:
                     failure_msg = (
@@ -451,6 +470,20 @@ async def handle_trojan_response(event, current_mint):
     
     # Log the communication
     log_communication(current_mint, 'received', response)
+
+def setup_logger():
+    """Configure logging with timestamps and levels"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S UTC'
+    )
+    # Set timezone to UTC for logging
+    logging.Formatter.converter = lambda *args: datetime.now(pytz.UTC).timetuple()
+    return logging.getLogger('TokenMonitor')
+
+# At the start of main.py, after imports:
+logger = setup_logger()
 
 async def main(auto=False):
     # Run setup if needed
@@ -487,7 +520,11 @@ async def main(auto=False):
         if not await verify_telegram_connection(client):
             return
         
-        print(f"\nStarting main loop - monitoring for new verified tokens (last {TOKEN_AGE} hours)...")
+        logger.info(f"Starting main loop - monitoring for new verified tokens (last {TOKEN_AGE} hours)")
+        
+        # Get wait times from environment
+        base_wait = float(os.getenv('WAIT_SECONDS', '5'))
+        retry_wait = base_wait * 2
         
         while True:
             try:
@@ -520,18 +557,17 @@ async def main(auto=False):
                     # Process each token
                     for mint, retry_count in tokens_to_process:
                         current_mint = mint
-                        print(f"\nProcessing token (attempt {retry_count + 1}/3):")
-                        print(f"Mint: {mint}")
+                        logger.info(f"Processing token (attempt {retry_count + 1}/3): {mint}")
                         await client.send_message('solana_trojanbot', mint)
-                        await asyncio.sleep(5)  # Wait for response
+                        await asyncio.sleep(retry_wait)
                 
                 current_mint = None
-                print("\nWaiting 15 seconds before next check...")
-                await asyncio.sleep(15)
+                logger.info(f"Waiting {base_wait} seconds before next check")
+                await asyncio.sleep(base_wait)
                 
             except Exception as e:
-                print(f"\nError in main loop: {e}")
-                await asyncio.sleep(15)
+                logger.error(f"Error in main loop: {e}")
+                await asyncio.sleep(base_wait)
 
 if __name__ == "__main__":
     args = parse_args()
