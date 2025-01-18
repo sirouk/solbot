@@ -10,6 +10,7 @@ import argparse
 import pytz
 import logging
 import json
+import time
 
 # Constants for Trojan bot response patterns
 TROJAN_HELP_PATTERN = "how do I use trojan?"
@@ -205,17 +206,70 @@ def fetch_pump_tokens():
     """Fetch recent pump tokens from Bitquery"""
     try:
         api_token = os.getenv("BITQUERY_API_TOKEN")
+        # Convert from user input (e.g. 5000) to decimal (e.g. 0.0000005)
+        min_mcap = float(os.getenv("MIN_MCAP_THRESHOLD", "5000"))  # Default 5000
+        min_mcap_decimal = (
+            f"{(min_mcap / 10000000000):.10f}"  # Convert to decimal format for query
+        )
+
         if not api_token:
             logger.error("BITQUERY_API_TOKEN not found in environment variables")
             return []
 
-        url = "https://streaming.bitquery.io/eap"
-        payload = json.dumps(
-            {
-                "query": '{ Solana { DEXTrades( limitBy: {count: 1, by: Trade_Buy_Currency_MintAddress} limit: {count: 100} orderBy: {descending: Block_Time } where: {Trade: {Buy: {Price: {gt: 0.0000005}, Currency: {MintAddress: {notIn: ["11111111111111111111111111111111"]}}}, Dex: {ProtocolName: {is: "pump"}}}, Transaction: {Result: {Success: true}}} ) { Block { Time } Trade { Buy { Currency { Name Symbol MintAddress Decimals Fungible Uri } } Sell { Currency { Name Symbol MintAddress Decimals Fungible Uri } } } } } }',
-                "variables": "{}",
+        # Build query with proper escaping for nested curly braces
+        query = (
+            """
+        {
+            Solana {
+                DEXTrades(
+                    limitBy: {count: 1, by: Trade_Buy_Currency_MintAddress}
+                    limit: {count: 100}
+                    orderBy: {descending: Block_Time}
+                    where: {
+                        Trade: {
+                            Buy: {
+                                Price: {gt: %s}
+                                Currency: {MintAddress: {notIn: ["11111111111111111111111111111111"]}}
+                            }
+                            Dex: {ProtocolName: {is: "pump"}}
+                        }
+                        Transaction: {Result: {Success: true}}
+                    }
+                ) {
+                    Block {
+                        Time
+                    }
+                    Trade {
+                        Buy {
+                            Currency {
+                                Name
+                                Symbol
+                                MintAddress
+                                Decimals
+                                Fungible
+                                Uri
+                            }
+                        }
+                        Sell {
+                            Currency {
+                                Name
+                                Symbol
+                                MintAddress
+                                Decimals
+                                Fungible
+                                Uri
+                            }
+                        }
+                    }
+                }
             }
+        }
+        """
+            % min_mcap_decimal
         )
+
+        url = "https://streaming.bitquery.io/eap"
+        payload = json.dumps({"query": query, "variables": "{}"})
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_token}",
@@ -237,7 +291,9 @@ def fetch_pump_tokens():
         ):
             for trade in data["data"]["Solana"]["DEXTrades"]:
                 token = trade["Trade"]["Buy"]["Currency"]
-                block_time = trade["Block"]["Time"]
+                block_time = datetime.fromisoformat(
+                    trade["Block"]["Time"].replace("Z", "+00:00")
+                )
                 tokens.append(
                     {
                         "mint": token["MintAddress"],
@@ -245,12 +301,9 @@ def fetch_pump_tokens():
                         "symbol": token.get("Symbol", ""),
                         "description": "",
                         "jup_verified": True,  # Not Jupiter verified
-                        "date_added": datetime.fromisoformat(
-                            block_time.replace("Z", "+00:00")
-                        ),
-                        "minted_at": datetime.fromisoformat(
-                            block_time.replace("Z", "+00:00")
-                        ),
+                        "created_at": block_time,  # Use block time as created_at
+                        "minted_at": block_time,  # Use block time as minted_at
+                        "daily_volume": None,  # Bitquery tokens don't have volume info
                     }
                 )
 
@@ -393,6 +446,7 @@ def setup_environment(auto=False):
     current_channel_id = os.getenv("RECIPIENT_IDS", "")
     current_token_age = os.getenv("TOKEN_AGE_HOURS", "1")
     current_bitquery_token = os.getenv("BITQUERY_API_TOKEN", "")
+    current_min_mcap = os.getenv("MIN_MCAP_THRESHOLD", "5000")
 
     # Check if .env exists
     if os.path.exists(".env"):
@@ -484,7 +538,38 @@ def setup_environment(auto=False):
     if not bitquery_token and current_bitquery_token:
         bitquery_token = current_bitquery_token
 
-    print("\nStep 5: Wait Time Configuration")
+    print("\nStep 5: Market Cap Threshold Configuration")
+    print("Set the minimum market cap threshold for tokens")
+    print("Example: Enter 5000 for 0.0000005 SOL market cap")
+    print("         Enter 2500 for 0.00000025 SOL market cap")
+    print("The value will be divided by 10^10 for the actual query")
+
+    while True:
+        try:
+            mcap_prompt = (
+                f" [current: {current_min_mcap}]: "
+                if current_min_mcap
+                else " (default 5000): "
+            )
+            mcap_input = input(
+                f"\nEnter the minimum market cap threshold{mcap_prompt}"
+            ).strip()
+            if not mcap_input:
+                min_mcap = current_min_mcap if current_min_mcap else "5000"
+                break
+            min_mcap = float(mcap_input)
+            if min_mcap <= 0:
+                print("Please enter a positive number")
+                continue
+            # Show the user what their input converts to
+            decimal_value = min_mcap / 10000000000
+            print(f"This will filter tokens with market cap > {decimal_value:.10f} SOL")
+            min_mcap = str(min_mcap)
+            break
+        except ValueError:
+            print("Please enter a valid number")
+
+    print("\nStep 6: Wait Time Configuration")
     while True:
         try:
             wait_time_prompt = (
@@ -516,8 +601,9 @@ def setup_environment(auto=False):
         f.write(f"TOKEN_AGE_HOURS={token_age}\n")
         f.write(f"WAIT_SECONDS={wait_time}\n")
         f.write(f"BITQUERY_API_TOKEN={bitquery_token}\n")
+        f.write(f"MIN_MCAP_THRESHOLD={min_mcap}\n")
 
-    print("\nStep 6: Verification")
+    print("\nStep 7: Verification")
     print("Let's verify your setup...")
 
     # Load the new environment variables
