@@ -20,6 +20,6 @@ headers = {
     "Authorization": f"Bearer {api_token}",
 }
 
-response = requests.request("POST", url, headers=headers, data=payload)
+response = requests.request("POST", url, headers=headers, data=payload, timeout=10)
 
 print(response.text)
