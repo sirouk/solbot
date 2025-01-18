@@ -25,16 +25,14 @@ def filter_recent_tokens(data, hours=1):
         # Check if token meets all our criteria:
         # 1. Has minted_at date
         # 2. No authorities set
-        # 3. Empty extensions
-        # 4. Within time window
+        # 3. Within time window
         minted_at = token.get('minted_at')
         created_at = token.get('created_at')
         
         if (minted_at and created_at and
             token.get('freeze_authority') is None and
             token.get('mint_authority') is None and
-            token.get('permanent_delegate') is None and
-            not token.get('extensions')):  # Empty extensions
+            token.get('permanent_delegate') is None):  # Empty extensions
             
             try:
                 created_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
@@ -45,19 +43,19 @@ def filter_recent_tokens(data, hours=1):
                 time_differences.append(time_diff)
                 
                 # Only include if minted within our time window
-                if minted_time > cutoff_time:
-                    recent_tokens.append({
-                        'address': token.get('address'),
-                        'name': token.get('name', ''),
-                        'symbol': token.get('symbol', ''),
-                        'decimals': token.get('decimals'),
-                        'logoURI': token.get('logoURI'),
-                        'tags': token.get('tags', []),
-                        'daily_volume': token.get('daily_volume'),
-                        'created_at': created_at,
-                        'minted_at': minted_at,
-                        'time_diff_seconds': time_diff
-                    })
+                #if minted_time > cutoff_time:
+                recent_tokens.append({
+                    'address': token.get('address'),
+                    'name': token.get('name', ''),
+                    'symbol': token.get('symbol', ''),
+                    'decimals': token.get('decimals'),
+                    'logoURI': token.get('logoURI'),
+                    'tags': token.get('tags', []),
+                    'daily_volume': token.get('daily_volume'),
+                    'created_at': created_at,
+                    'minted_at': minted_at,
+                    'time_diff_seconds': time_diff
+                })
             except ValueError as e:
                 print(f"Error parsing date for token {token.get('symbol')}: {e}")
                 continue
