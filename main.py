@@ -9,6 +9,7 @@ import re
 import argparse
 import pytz
 import logging
+import json
 
 # Constants for Trojan bot response patterns
 TROJAN_HELP_PATTERN = "how do I use trojan?"
@@ -200,6 +201,66 @@ def fetch_verified_tokens():
         return []
 
 
+def fetch_pump_tokens():
+    """Fetch recent pump tokens from Bitquery"""
+    try:
+        api_token = os.getenv("BITQUERY_API_TOKEN")
+        if not api_token:
+            logger.error("BITQUERY_API_TOKEN not found in environment variables")
+            return []
+
+        url = "https://streaming.bitquery.io/eap"
+        payload = json.dumps(
+            {
+                "query": '{ Solana { DEXTrades( limitBy: {count: 1, by: Trade_Buy_Currency_MintAddress} limit: {count: 100} orderBy: {descending: Block_Time } where: {Trade: {Buy: {Price: {gt: 0.0000005}, Currency: {MintAddress: {notIn: ["11111111111111111111111111111111"]}}}, Dex: {ProtocolName: {is: "pump"}}}, Transaction: {Result: {Success: true}}} ) { Block { Time } Trade { Buy { Currency { Name Symbol MintAddress Decimals Fungible Uri } } Sell { Currency { Name Symbol MintAddress Decimals Fungible Uri } } } } } }',
+                "variables": "{}",
+            }
+        )
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_token}",
+        }
+
+        response = requests.request(
+            "POST", url, headers=headers, data=payload, timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        # Extract tokens from response
+        tokens = []
+        if (
+            data
+            and "data" in data
+            and "Solana" in data["data"]
+            and "DEXTrades" in data["data"]["Solana"]
+        ):
+            for trade in data["data"]["Solana"]["DEXTrades"]:
+                token = trade["Trade"]["Buy"]["Currency"]
+                block_time = trade["Block"]["Time"]
+                tokens.append(
+                    {
+                        "mint": token["MintAddress"],
+                        "name": token.get("Name", ""),
+                        "symbol": token.get("Symbol", ""),
+                        "description": "",
+                        "jup_verified": True,  # Not Jupiter verified
+                        "date_added": datetime.fromisoformat(
+                            block_time.replace("Z", "+00:00")
+                        ),
+                        "minted_at": datetime.fromisoformat(
+                            block_time.replace("Z", "+00:00")
+                        ),
+                    }
+                )
+
+        logger.info(f"Fetched {len(tokens)} pump tokens from Bitquery")
+        return tokens
+    except Exception as e:
+        logger.error(f"Error fetching pump tokens: {e}")
+        return []
+
+
 def process_tokens(tokens):
     """Process tokens and return new verified tokens and status changes"""
     conn = sqlite3.connect("tokens.db")
@@ -331,6 +392,7 @@ def setup_environment(auto=False):
     current_phone = os.getenv("TELEGRAM_PHONE", "")
     current_channel_id = os.getenv("RECIPIENT_IDS", "")
     current_token_age = os.getenv("TOKEN_AGE_HOURS", "1")
+    current_bitquery_token = os.getenv("BITQUERY_API_TOKEN", "")
 
     # Check if .env exists
     if os.path.exists(".env"):
@@ -409,7 +471,20 @@ def setup_environment(auto=False):
         except ValueError:
             print("Please enter a valid number")
 
-    print("\nStep 4: Wait Time Configuration")
+    print("\nStep 4: Bitquery API Setup")
+    print("You'll need a Bitquery API token to monitor pump tokens:")
+    print("1. Go to https://graphql.bitquery.io")
+    print("2. Sign up or log in")
+    print("3. Get your API token from your profile")
+
+    bitquery_prompt = (
+        f" [current: {current_bitquery_token}]: " if current_bitquery_token else ": "
+    )
+    bitquery_token = input(f"\nEnter your Bitquery API token{bitquery_prompt}").strip()
+    if not bitquery_token and current_bitquery_token:
+        bitquery_token = current_bitquery_token
+
+    print("\nStep 5: Wait Time Configuration")
     while True:
         try:
             wait_time_prompt = (
@@ -440,8 +515,9 @@ def setup_environment(auto=False):
         f.write(f"RECIPIENT_IDS={channel_id}\n")
         f.write(f"TOKEN_AGE_HOURS={token_age}\n")
         f.write(f"WAIT_SECONDS={wait_time}\n")
+        f.write(f"BITQUERY_API_TOKEN={bitquery_token}\n")
 
-    print("\nStep 5: Verification")
+    print("\nStep 6: Verification")
     print("Let's verify your setup...")
 
     # Load the new environment variables
@@ -458,8 +534,9 @@ def setup_environment(auto=False):
     print("\n=== Setup Complete! ===")
     print("\nYour configuration has been saved. The script will now:")
     print(f"1. Monitor for new Jupiter-verified tokens (up to {token_age} hours old)")
-    print("2. Attempt to purchase them through the Trojan bot")
-    print("3. Send status updates to your saved messages")
+    print("2. Monitor for new pump tokens via Bitquery")
+    print("3. Attempt to purchase them through the Trojan bot")
+    print("4. Send status updates to your saved messages")
     print("\nWould you like to start the monitor now? (y/n)")
 
     return input().lower() == "y"
@@ -602,6 +679,7 @@ async def main(auto=False):
             os.getenv("TELEGRAM_PHONE"),
             os.getenv("RECIPIENT_IDS"),
             os.getenv("TOKEN_AGE_HOURS"),
+            os.getenv("BITQUERY_API_TOKEN"),
         ]
     ):
         if not setup_environment(auto):
@@ -640,10 +718,16 @@ async def main(auto=False):
 
         while True:
             try:
-                tokens = fetch_verified_tokens()
+                # Fetch both Jupiter and pump tokens
+                # jupiter_tokens = fetch_verified_tokens()
+                pump_tokens = fetch_pump_tokens()
 
-                if tokens:
-                    new_verified_tokens, status_changes = process_tokens(tokens)
+                # Combine token lists
+                # all_tokens = jupiter_tokens + pump_tokens
+                all_tokens = pump_tokens
+
+                if all_tokens:
+                    new_verified_tokens, status_changes = process_tokens(all_tokens)
 
                     # Notify about new tokens
                     for token in new_verified_tokens:
