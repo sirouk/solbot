@@ -127,6 +127,7 @@ async def send_personal_message(client, message):
 def fetch_verified_tokens():
     """Fetch tokens from the Jupiter API and filter by age"""
     try:
+        print("Fetching verified tokens from Jupiter API...")
         api_url = "https://tokens.jup.ag/tokens?tags=verified,community,strict,lst,birdeye-trending,clone,pump"
         response = requests.get(api_url)
         response.raise_for_status()
@@ -205,8 +206,8 @@ def fetch_verified_tokens():
 def fetch_pump_tokens():
     """Fetch recent pump tokens from Bitquery"""
     try:
+        print("Fetching pump tokens from Bitquery...")
         api_token = os.getenv("BITQUERY_API_TOKEN")
-        # Convert from user input (e.g. 5000) to decimal (e.g. 0.0000005)
         min_mcap = float(os.getenv("MIN_MCAP_THRESHOLD", "5000"))  # Default 5000
         min_mcap_decimal = (
             f"{(min_mcap / 10000000000):.10f}"  # Convert to decimal format for query
@@ -300,7 +301,7 @@ def fetch_pump_tokens():
                         "name": token.get("Name", ""),
                         "symbol": token.get("Symbol", ""),
                         "description": "",
-                        "jup_verified": True,  # Not Jupiter verified
+                        "jup_verified": True,  # Mark all tokens as verified
                         "created_at": block_time,  # Use block time as created_at
                         "minted_at": block_time,  # Use block time as minted_at
                         "daily_volume": None,  # Bitquery tokens don't have volume info
@@ -592,6 +593,55 @@ def setup_environment(auto=False):
         except ValueError:
             print("Please enter a valid number")
 
+    print("\nStep 7: Token Source Configuration")
+    print("Configure which token sources to monitor")
+
+    while True:
+        try:
+            jupiter_prompt = (
+                f" [current: {os.getenv('ENABLE_JUPITER', 'false')}]: "
+                if os.getenv("ENABLE_JUPITER")
+                else " (default: false): "
+            )
+            jupiter_input = (
+                input(f"\nEnable Jupiter verified tokens? (true/false){jupiter_prompt}")
+                .strip()
+                .lower()
+            )
+            if not jupiter_input:
+                enable_jupiter = os.getenv("ENABLE_JUPITER", "false")
+                break
+            if jupiter_input not in ["true", "false"]:
+                print("Please enter true or false")
+                continue
+            enable_jupiter = jupiter_input
+            break
+        except ValueError:
+            print("Please enter true or false")
+
+    while True:
+        try:
+            pump_prompt = (
+                f" [current: {os.getenv('ENABLE_PUMP', 'true')}]: "
+                if os.getenv("ENABLE_PUMP")
+                else " (default: true): "
+            )
+            pump_input = (
+                input(f"\nEnable pump tokens? (true/false){pump_prompt}")
+                .strip()
+                .lower()
+            )
+            if not pump_input:
+                enable_pump = os.getenv("ENABLE_PUMP", "true")
+                break
+            if pump_input not in ["true", "false"]:
+                print("Please enter true or false")
+                continue
+            enable_pump = pump_input
+            break
+        except ValueError:
+            print("Please enter true or false")
+
     # Create .env file
     with open(".env", "w") as f:
         f.write(f"TELEGRAM_API_ID={api_id}\n")
@@ -602,8 +652,10 @@ def setup_environment(auto=False):
         f.write(f"WAIT_SECONDS={wait_time}\n")
         f.write(f"BITQUERY_API_TOKEN={bitquery_token}\n")
         f.write(f"MIN_MCAP_THRESHOLD={min_mcap}\n")
+        f.write(f"ENABLE_JUPITER={enable_jupiter}\n")
+        f.write(f"ENABLE_PUMP={enable_pump}\n")
 
-    print("\nStep 7: Verification")
+    print("\nStep 8: Verification")
     print("Let's verify your setup...")
 
     # Load the new environment variables
@@ -804,13 +856,16 @@ async def main(auto=False):
 
         while True:
             try:
-                # Fetch both Jupiter and pump tokens
-                # jupiter_tokens = fetch_verified_tokens()
-                pump_tokens = fetch_pump_tokens()
+                all_tokens = []
 
-                # Combine token lists
-                # all_tokens = jupiter_tokens + pump_tokens
-                all_tokens = pump_tokens
+                # Fetch tokens based on configuration
+                if os.getenv("ENABLE_JUPITER", "false").lower() == "true":
+                    jupiter_tokens = fetch_verified_tokens()
+                    all_tokens.extend(jupiter_tokens)
+
+                if os.getenv("ENABLE_PUMP", "true").lower() == "true":
+                    pump_tokens = fetch_pump_tokens()
+                    all_tokens.extend(pump_tokens)
 
                 if all_tokens:
                     new_verified_tokens, status_changes = process_tokens(all_tokens)
@@ -831,7 +886,6 @@ async def main(auto=False):
                     FROM verified_tokens 
                     WHERE is_bought = FALSE 
                     AND retry_count < 3 
-                    AND jup_verified = TRUE
                     ORDER BY date_added ASC
                     """)
 
