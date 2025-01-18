@@ -10,6 +10,23 @@ import argparse
 import pytz
 import logging
 
+# Constants for Trojan bot response patterns
+TROJAN_HELP_PATTERN = "how do I use trojan?"
+TROJAN_TRANSACTION_SENT_PATTERN = "transaction sent"
+
+TROJAN_SUCCESS_PATTERNS = [
+    "buy success"
+]
+
+TROJAN_FAILURE_PATTERNS = [
+    "insufficient balance",
+    "error",
+    "failed",
+    "🔴",
+    "token not found",
+    "transaction failed"
+]
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Solana Token Monitor')
     parser.add_argument('--auto', action='store_true', help='Skip configuration prompts if .env exists')
@@ -383,15 +400,24 @@ async def handle_trojan_response(event, current_mint):
     """Handle and log responses from Trojan bot"""
     response = event.message.text
     
+    # Initialize status variables
+    is_failure = False
+    is_success = False
+    transaction_confirmed = False
+    
     # Skip processing help message
-    if "How do I use Trojan?" in response:
+    if TROJAN_HELP_PATTERN in response.lower():
         return
         
-    print(f"\nTrojan Bot Response for {current_mint}:")
-    print(response)
+    logger.info(f"\nTrojan Bot Response for {current_mint}:")
+    logger.info(response)
     
+    # Check initial response for failure conditions
+    if any(x in response.lower() for x in TROJAN_FAILURE_PATTERNS):
+        is_failure = True
+        transaction_confirmed = True
     # Check if response indicates a transaction was sent
-    if "Transaction sent" in response:
+    elif TROJAN_TRANSACTION_SENT_PATTERN in response.lower():
         # Wait for message edit with transaction result
         try:
             # Wait up to 60 seconds for transaction confirmation
@@ -402,26 +428,27 @@ async def handle_trojan_response(event, current_mint):
                 if message and message[0].text != response:
                     # Message was edited, process the new response
                     response = message[0].text
-                    print(f"\nUpdated Trojan Bot Response:")
-                    print(response)
-                    break
+                    logger.info(f"\nUpdated Trojan Bot Response:")
+                    logger.info(response)
+                    
+                    # Check if we got a final state
+                    if any(x in response.lower() for x in TROJAN_SUCCESS_PATTERNS):
+                        transaction_confirmed = True
+                        is_success = True
+                        break
+                    elif any(x in response.lower() for x in TROJAN_FAILURE_PATTERNS):
+                        transaction_confirmed = True
+                        is_failure = True
+                        break
+                        
+            if not transaction_confirmed:
+                logger.warning(f"Transaction status unclear after timeout for {current_mint}")
+                return
+                
         except Exception as e:
-            print(f"Error checking transaction status: {e}")
+            logger.error(f"Error checking transaction status: {e}")
+            return
     
-    # Check if response indicates a failure
-    is_failure = any(x in response.lower() for x in [
-        "insufficient balance",
-        "error",
-        "failed",
-        "🔴",
-        "token not found",
-        "transaction failed"
-    ])
-    
-    # Check if response indicates success
-    is_success = any(x in response.lower() for x in [
-        "buy success",
-    ])
     
     if current_mint:
         conn = sqlite3.connect('tokens.db')
