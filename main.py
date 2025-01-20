@@ -379,6 +379,8 @@ def fetch_solwatch_tokens():
                 'created_at': created_time,  # Now timezone-aware
                 'minted_at': created_time,   # Now timezone-aware
                 'daily_volume': None,
+                'has_mint_authority': False,  # Add these fields since we already filtered for them
+                'has_freeze_authority': False,  # in the SQL query
                 'notification_msg': (
                     f"🔍 SolWatch Token Found!\n"
                     f"Address: {mint_address}\n"
@@ -442,17 +444,6 @@ def process_tokens(tokens):
         mint = token["mint"]
         is_verified = token.get("jup_verified", False)
         created_at = token["created_at"]  # Should already be timezone-aware from fetch_solwatch_tokens
-        has_mint_authority = token.get("has_mint_authority", True)  # Default to True for safety
-        has_freeze_authority = token.get("has_freeze_authority", True)  # Default to True for safety
-
-        # Skip tokens with mint or freeze authority
-        if has_mint_authority or has_freeze_authority:
-            logger.info(f"Skipping unsafe token {mint}:")
-            if has_mint_authority:
-                logger.info("  - Has mint authority")
-            if has_freeze_authority:
-                logger.info("  - Has freeze authority")
-            continue
 
         # Check if token matches the selection mode
         has_pump = mint.endswith("pump")
