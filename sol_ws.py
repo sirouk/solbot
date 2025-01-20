@@ -63,7 +63,20 @@ def init_db():
                   owner TEXT,
                   first_seen_slot INTEGER,
                   last_updated_slot INTEGER,
-                  last_updated_time TIMESTAMP)''')
+                  last_updated_time TIMESTAMP,
+                  holder_count INTEGER DEFAULT 0,
+                  holder_ratio REAL DEFAULT 0.0,
+                  last_holder_check TIMESTAMP)''')
+    
+    # Add new columns if they don't exist
+    try:
+        c.execute('ALTER TABLE tokens ADD COLUMN holder_count INTEGER DEFAULT 0')
+        c.execute('ALTER TABLE tokens ADD COLUMN holder_ratio REAL DEFAULT 0.0')
+        c.execute('ALTER TABLE tokens ADD COLUMN last_holder_check TIMESTAMP')
+        logger.info("Added holder metrics columns to tokens table")
+    except sqlite3.OperationalError:
+        # Columns already exist
+        pass
     
     conn.commit()
     conn.close()
