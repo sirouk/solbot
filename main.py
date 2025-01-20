@@ -27,6 +27,9 @@ TROJAN_FAILURE_PATTERNS = [
     "transaction failed",
 ]
 
+TOKENS_DB = "tokens.db"
+TOKEN_WATCH_DB = "token_watch.db"
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Solana Token Monitor")
@@ -38,7 +41,7 @@ def parse_args():
 
 def create_database():
     """Create the SQLite database and tables"""
-    conn = sqlite3.connect("tokens.db")
+    conn = sqlite3.connect(TOKENS_DB)
     cursor = conn.cursor()
 
     # Create tokens table
@@ -77,15 +80,18 @@ def create_database():
 
 def log_communication(mint, message_type, message_content):
     """Log communication with Trojan bot"""
-    conn = sqlite3.connect("tokens.db")
+    conn = sqlite3.connect(TOKENS_DB)
     cursor = conn.cursor()
+
+    # Format timestamp with microseconds precision
+    current_time = datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
 
     cursor.execute(
         """
     INSERT INTO bot_communications (mint, timestamp, message_type, message_content)
     VALUES (?, ?, ?, ?)
     """,
-        (mint, datetime.now(), message_type, message_content),
+        (mint, current_time, message_type, message_content),
     )
 
     conn.commit()
@@ -96,7 +102,7 @@ async def verify_telegram_connection(client):
     """Test Telegram connection by sending a help command to Trojan bot"""
     try:
         logger.info("Testing Telegram connection...")
-        await client.send_message("solana_trojanbot", "/help")
+        await client.send_message(os.getenv("BOT_TG_HANDLE"), "/help")
         log_communication(None, "sent", "/help")
         logger.info("Successfully connected to Telegram and Trojan bot!")
         return True
@@ -134,9 +140,9 @@ def fetch_verified_tokens():
         tokens = response.json()
 
         # Get configured token age and ensure cutoff is in UTC
-        token_age = float(os.getenv("TOKEN_AGE_HOURS", "1"))
+        token_age_minutes = float(os.getenv("TOKEN_AGE_MINUTES", "1"))
         current_time = datetime.now(pytz.UTC)
-        cutoff_time = current_time - timedelta(hours=token_age)
+        cutoff_time = current_time - timedelta(minutes=token_age_minutes)
 
         formatted_tokens = []
         for token in tokens:
@@ -151,7 +157,6 @@ def fetch_verified_tokens():
                     token.get("freeze_authority") is None
                     and token.get("mint_authority") is None
                     and token.get("permanent_delegate") is None
-                    and not token.get("extensions")
                 )
             ):
                 try:
@@ -195,7 +200,7 @@ def fetch_verified_tokens():
             logger.info(f"Max difference: {max(time_diffs):.2f} seconds")
 
         logger.info(
-            f"Fetched {len(formatted_tokens)} recent tokens from Jupiter API (last {token_age} hours)"
+            f"Fetched {len(formatted_tokens)} recent tokens from Jupiter API (last {token_age_minutes} minutes)"
         )
         return formatted_tokens
     except Exception as e:
@@ -203,7 +208,7 @@ def fetch_verified_tokens():
         return []
 
 
-def fetch_pump_tokens():
+def fetch_from_bitquery():
     """Fetch recent pump tokens from Bitquery"""
     try:
         print("Fetching pump tokens from Bitquery...")
@@ -315,9 +320,91 @@ def fetch_pump_tokens():
         return []
 
 
+def fetch_solwatch_tokens():
+    """Fetch qualifying tokens from SolWatch database"""
+    try:
+        print("Fetching tokens from SolWatch database...")
+        token_age_minutes = float(os.getenv("TOKEN_AGE_MINUTES", "1"))
+        selection_mode = os.getenv("TOKEN_SELECTION_MODE", "pump").lower()
+        cutoff_time = datetime.now(pytz.UTC) - timedelta(minutes=token_age_minutes)
+        cutoff_time_str = cutoff_time.strftime("%Y-%m-%d %H:%M:%S.%f")
+        
+        # Connect to SolWatch database in read-only mode
+        solwatch_db = sqlite3.connect(f"file:{TOKEN_WATCH_DB}?mode=ro", uri=True)
+        cursor = solwatch_db.cursor()
+        
+        # Build WHERE clause based on selection mode
+        pump_filter = ""
+        if selection_mode == "pump":
+            pump_filter = "AND is_pump_token = TRUE"
+        elif selection_mode == "non-pump":
+            pump_filter = "AND is_pump_token = FALSE"
+        # For "all" mode, we don't add any pump filter
+        
+        query = f"""
+            SELECT 
+                mint_address,
+                raw_supply,
+                actual_supply,
+                decimals,
+                first_seen_slot,
+                last_updated_time,
+                is_pump_token
+            FROM tokens 
+            WHERE has_mint_authority = FALSE 
+            AND has_freeze_authority = FALSE 
+            AND last_updated_time > ?
+            {pump_filter}
+            ORDER BY last_updated_time DESC
+        """
+        
+        print(f"\nExecuting query on {TOKEN_WATCH_DB}:")
+        print(f"Using cutoff time: {cutoff_time_str}")
+        print(f"Selection mode: {selection_mode}")
+        
+        cursor.execute(query, (cutoff_time_str,))
+        
+        tokens = []
+        for row in cursor.fetchall():
+            mint_address, raw_supply, actual_supply, decimals, first_seen_slot, last_updated, is_pump_token = row
+            # Parse timestamp and make it timezone-aware
+            created_time = datetime.strptime(last_updated, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=pytz.UTC)
+            
+            tokens.append({
+                'mint': mint_address,
+                'name': '',
+                'symbol': '',
+                'description': f'Supply: {actual_supply:,.2f}, Decimals: {decimals}',
+                'jup_verified': False,
+                'created_at': created_time,  # Now timezone-aware
+                'minted_at': created_time,   # Now timezone-aware
+                'daily_volume': None,
+                'notification_msg': (
+                    f"🔍 SolWatch Token Found!\n"
+                    f"Address: {mint_address}\n"
+                    f"Supply: {actual_supply:,.2f}\n"
+                    f"Decimals: {decimals}\n"
+                    f"First seen slot: {first_seen_slot}\n"
+                    f"Last updated: {last_updated}\n"
+                    f"✅ SAFETY CHECKS:\n"
+                    f"  - Contains 'pump': {'✅' if is_pump_token else '❌'}\n"
+                    f"  - No mint authority: ✅\n"
+                    f"  - No freeze authority: ✅"
+                )
+            })
+        
+        solwatch_db.close()
+        logger.info(f"Fetched {len(tokens)} qualifying tokens from SolWatch")
+        return tokens
+        
+    except Exception as e:
+        logger.error(f"Error fetching SolWatch tokens: {e}")
+        return []
+
+
 def process_tokens(tokens):
     """Process tokens and return new verified tokens and status changes"""
-    conn = sqlite3.connect("tokens.db")
+    conn = sqlite3.connect(TOKENS_DB)
     cursor = conn.cursor()
 
     # Add minted_at column if it doesn't exist
@@ -334,27 +421,49 @@ def process_tokens(tokens):
     status_changes = []
 
     # Get configured token age for cleanup
-    token_age = float(os.getenv("TOKEN_AGE_HOURS", "1"))
-    cutoff_time = datetime.now(pytz.UTC) - timedelta(hours=token_age)
+    token_age_minutes = float(os.getenv("TOKEN_AGE_MINUTES", "1"))
+    max_retries = int(os.getenv("MAX_TOKEN_RETRIES", "3"))
+    selection_mode = os.getenv("TOKEN_SELECTION_MODE", "pump").lower()
+    cutoff_time = datetime.now(pytz.UTC) - timedelta(minutes=token_age_minutes)
+    cutoff_time_str = cutoff_time.strftime("%Y-%m-%d %H:%M:%S.%f")
 
     # Clean up old tokens that were never bought
-    cursor.execute(
-        """
-    DELETE FROM verified_tokens 
-    WHERE is_bought = FALSE 
-    AND date_added < ? 
-    AND retry_count >= 3
-    """,
-        (cutoff_time,),
-    )
+    # cursor.execute(
+    #     """
+    # DELETE FROM verified_tokens 
+    # WHERE is_bought = FALSE 
+    # AND date_added < ? 
+    # AND retry_count >= ?
+    # """,
+    #     (cutoff_time_str, max_retries),
+    # )
 
     for token in tokens:
         mint = token["mint"]
         is_verified = token.get("jup_verified", False)
-        created_at = token["created_at"]
+        created_at = token["created_at"]  # Should already be timezone-aware from fetch_solwatch_tokens
+        has_mint_authority = token.get("has_mint_authority", True)  # Default to True for safety
+        has_freeze_authority = token.get("has_freeze_authority", True)  # Default to True for safety
+
+        # Skip tokens with mint or freeze authority
+        if has_mint_authority or has_freeze_authority:
+            logger.info(f"Skipping unsafe token {mint}:")
+            if has_mint_authority:
+                logger.info("  - Has mint authority")
+            if has_freeze_authority:
+                logger.info("  - Has freeze authority")
+            continue
+
+        # Check if token matches the selection mode
+        has_pump = mint.endswith("pump")
+        if selection_mode == "pump" and not has_pump:
+            continue
+        elif selection_mode == "non-pump" and has_pump:
+            continue
+        # If selection_mode is "all", process all tokens
 
         # Only process tokens within our monitoring window
-        if created_at > cutoff_time:
+        if created_at > cutoff_time:  # Now comparing timezone-aware datetimes
             # Check if token exists
             cursor.execute(
                 "SELECT jup_verified, is_bought, retry_count FROM verified_tokens WHERE mint = ?",
@@ -383,7 +492,11 @@ def process_tokens(tokens):
                         f"Address: {mint}\n"
                         f"Listed: {created_at_str}\n"
                         f"Minted: {minted_at_str}\n"
-                        f"Daily Volume: {volume_str}"
+                        f"Daily Volume: {volume_str}\n"
+                        f"✅ SAFETY CHECKS:\n"
+                        f"  - No mint authority: ✅\n"
+                        f"  - No freeze authority: ✅\n"
+                        f"  - Contains 'pump': {'✅' if has_pump else '❌'}"
                     )
 
                 cursor.execute(
@@ -445,9 +558,10 @@ def setup_environment(auto=False):
     current_api_hash = os.getenv("TELEGRAM_API_HASH", "")
     current_phone = os.getenv("TELEGRAM_PHONE", "")
     current_channel_id = os.getenv("RECIPIENT_IDS", "")
-    current_token_age = os.getenv("TOKEN_AGE_HOURS", "1")
+    current_token_age = os.getenv("TOKEN_AGE_MINUTES", "1")
     current_bitquery_token = os.getenv("BITQUERY_API_TOKEN", "")
     current_min_mcap = os.getenv("MIN_MCAP_THRESHOLD", "5000")
+    current_selection_mode = os.getenv("TOKEN_SELECTION_MODE", "pump")
 
     # Check if .env exists
     if os.path.exists(".env"):
@@ -507,12 +621,12 @@ def setup_environment(auto=False):
     while True:
         try:
             age_prompt = (
-                f" [current: {current_token_age} hours]: "
+                f" [current: {current_token_age} minutes]: "
                 if current_token_age
                 else " (default 1): "
             )
             age_input = input(
-                f"\nEnter the maximum age of tokens to monitor{age_prompt}"
+                f"\nEnter the maximum age of tokens to monitor in minutes{age_prompt}"
             ).strip()
             if not age_input:
                 token_age = current_token_age if current_token_age else "1"
@@ -593,7 +707,23 @@ def setup_environment(auto=False):
         except ValueError:
             print("Please enter a valid number")
 
-    print("\nStep 7: Token Source Configuration")
+    print("\nStep 7: Token Selection Mode")
+    print("Choose how to filter tokens based on 'pump' in their name:")
+    print("1. pump    - Only process tokens with 'pump' in the name")
+    print("2. non-pump - Only process tokens without 'pump' in the name")
+    print("3. all     - Process all tokens regardless of name")
+    
+    selection_mode_prompt = f" [current: {current_selection_mode}]: " if current_selection_mode else ": "
+    while True:
+        mode = input(f"Enter token selection mode{selection_mode_prompt}").strip().lower()
+        if not mode and current_selection_mode:
+            mode = current_selection_mode
+            break
+        if mode in ["pump", "non-pump", "all"]:
+            break
+        print("Please enter 'pump', 'non-pump', or 'all'")
+
+    print("\nStep 8: Token Source Configuration")
     print("Configure which token sources to monitor")
 
     while True:
@@ -642,20 +772,37 @@ def setup_environment(auto=False):
         except ValueError:
             print("Please enter true or false")
 
+    while True:
+        try:
+            solwatch_prompt = f" [current: {os.getenv('ENABLE_SOLWATCH', 'true')}]: " if os.getenv('ENABLE_SOLWATCH') else " (default: true): "
+            solwatch_input = input(f"\nEnable SolWatch tokens? (true/false){solwatch_prompt}").strip().lower()
+            if not solwatch_input:
+                enable_solwatch = os.getenv("ENABLE_SOLWATCH", "true")
+                break
+            if solwatch_input not in ["true", "false"]:
+                print("Please enter true or false")
+                continue
+            enable_solwatch = solwatch_input
+            break
+        except ValueError:
+            print("Please enter true or false")
+
     # Create .env file
     with open(".env", "w") as f:
         f.write(f"TELEGRAM_API_ID={api_id}\n")
         f.write(f"TELEGRAM_API_HASH={api_hash}\n")
         f.write(f"TELEGRAM_PHONE={phone}\n")
         f.write(f"RECIPIENT_IDS={channel_id}\n")
-        f.write(f"TOKEN_AGE_HOURS={token_age}\n")
+        f.write(f"TOKEN_AGE_MINUTES={token_age}\n")
+        f.write(f"TOKEN_SELECTION_MODE={mode}\n")
         f.write(f"WAIT_SECONDS={wait_time}\n")
         f.write(f"BITQUERY_API_TOKEN={bitquery_token}\n")
         f.write(f"MIN_MCAP_THRESHOLD={min_mcap}\n")
         f.write(f"ENABLE_JUPITER={enable_jupiter}\n")
         f.write(f"ENABLE_PUMP={enable_pump}\n")
+        f.write(f"ENABLE_SOLWATCH={enable_solwatch}\n")
 
-    print("\nStep 8: Verification")
+    print("\nStep 9: Verification")
     print("Let's verify your setup...")
 
     # Load the new environment variables
@@ -671,7 +818,7 @@ def setup_environment(auto=False):
 
     print("\n=== Setup Complete! ===")
     print("\nYour configuration has been saved. The script will now:")
-    print(f"1. Monitor for new Jupiter-verified tokens (up to {token_age} hours old)")
+    print(f"1. Monitor for new Jupiter-verified tokens (up to {token_age} minutes old)")
     print("2. Monitor for new pump tokens via Bitquery")
     print("3. Attempt to purchase them through the Trojan bot")
     print("4. Send status updates to your saved messages")
@@ -684,103 +831,37 @@ async def handle_trojan_response(event, current_mint):
     """Handle and log responses from Trojan bot"""
     response = event.message.text
 
-    # Initialize status variables
-    is_failure = False
-    is_success = False
-    transaction_confirmed = False
-
-    # Skip processing help message
-    if TROJAN_HELP_PATTERN in response.lower():
-        return
-
+    # Always log the message for monitoring purposes
     logger.info(f"\nTrojan Bot Response for {current_mint}:")
     logger.info(response)
 
-    # Check initial response for failure conditions
-    if any(x in response.lower() for x in TROJAN_FAILURE_PATTERNS):
-        is_failure = True
-        transaction_confirmed = True
-    # Check if response indicates a transaction was sent
-    elif TROJAN_TRANSACTION_SENT_PATTERN in response.lower():
-        # Wait for message edit with transaction result
-        try:
-            # Wait up to 60 seconds for transaction confirmation
-            for _ in range(12):  # 12 * 5 seconds = 60 seconds total
-                await asyncio.sleep(5)
-                # Get the updated message
-                message = await event.client.get_messages(
-                    event.chat_id, ids=[event.message.id]
-                )
-                if message and message[0].text != response:
-                    # Message was edited, process the new response
-                    response = message[0].text
-                    logger.info(f"\nUpdated Trojan Bot Response:")
-                    logger.info(response)
+    # Skip processing if no current mint or help message
+    if not current_mint or TROJAN_HELP_PATTERN in response.lower():
+        return
 
-                    # Check if we got a final state
-                    if any(x in response.lower() for x in TROJAN_SUCCESS_PATTERNS):
-                        transaction_confirmed = True
-                        is_success = True
-                        break
-                    elif any(x in response.lower() for x in TROJAN_FAILURE_PATTERNS):
-                        transaction_confirmed = True
-                        is_failure = True
-                        break
+    # Skip processing if the message doesn't contain our current mint address
+    if current_mint not in response:
+        return
 
-            if not transaction_confirmed:
-                logger.warning(
-                    f"Transaction status unclear after timeout for {current_mint}"
-                )
-                return
-
-        except Exception as e:
-            logger.error(f"Error checking transaction status: {e}")
-            return
-
-    if current_mint:
-        conn = sqlite3.connect("tokens.db")
+    # Only check for success patterns
+    if any(x in response.lower() for x in TROJAN_SUCCESS_PATTERNS):
+        conn = sqlite3.connect(TOKENS_DB)
         cursor = conn.cursor()
 
         try:
-            if is_failure:
-                # Increment retry count
-                cursor.execute(
-                    """
-                UPDATE verified_tokens 
-                SET retry_count = retry_count + 1,
-                    last_attempt = ?
-                WHERE mint = ?
-                """,
-                    (datetime.now(), current_mint),
-                )
-
-                # Check if we've hit max retries
-                cursor.execute(
-                    "SELECT retry_count FROM verified_tokens WHERE mint = ?",
-                    (current_mint,),
-                )
-                retry_count = cursor.fetchone()[0]
-                logger.warning(f"Current retry count for {current_mint}: {retry_count}")
-
-                if retry_count >= 3:
-                    failure_msg = (
-                        f"⚠️ Maximum retries reached for token!\n"
-                        f"Mint: {current_mint}\n"
-                        f"Last error: {response}"
-                    )
-                    await send_personal_message(event.client, failure_msg)
-            elif is_success:
-                # Success - mark as bought
-                cursor.execute(
-                    """
+            # Mark as bought if successful
+            current_time = datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
+            cursor.execute(
+                """
                 UPDATE verified_tokens 
                 SET is_bought = TRUE,
                     date_bought = ?
-                WHERE mint = ?
+                WHERE mint = ? AND is_bought = FALSE
                 """,
-                    (datetime.now(), current_mint),
-                )
+                (current_time, current_mint),
+            )
 
+            if cursor.rowcount > 0:  # Only notify if we actually updated a row
                 success_msg = f"🎉 Successfully purchased token!\nMint: {current_mint}"
                 await send_personal_message(event.client, success_msg)
 
@@ -816,7 +897,7 @@ async def main(auto=False):
             os.getenv("TELEGRAM_API_HASH"),
             os.getenv("TELEGRAM_PHONE"),
             os.getenv("RECIPIENT_IDS"),
-            os.getenv("TOKEN_AGE_HOURS"),
+            os.getenv("TOKEN_AGE_MINUTES"),
             os.getenv("BITQUERY_API_TOKEN"),
         ]
     ):
@@ -832,14 +913,14 @@ async def main(auto=False):
     API_HASH = os.getenv("TELEGRAM_API_HASH")
     PHONE_NUMBER = os.getenv("TELEGRAM_PHONE")
     MY_TELEGRAM_ID = os.getenv("RECIPIENT_IDS").split(",")[0]
-    TOKEN_AGE = os.getenv("TOKEN_AGE_HOURS", "1")
+    TOKEN_AGE = os.getenv("TOKEN_AGE_MINUTES", "1")
 
     create_database()
 
     async with TelegramClient("sirouk_session", API_ID, API_HASH) as client:
         current_mint = None
 
-        @client.on(events.NewMessage(from_users="solana_trojanbot"))
+        @client.on(events.NewMessage(from_users=os.getenv("BOT_TG_HANDLE")))
         async def trojan_handler(event):
             await handle_trojan_response(event, current_mint)
 
@@ -847,7 +928,7 @@ async def main(auto=False):
             return
 
         logger.info(
-            f"Starting main loop - monitoring for new verified tokens (last {TOKEN_AGE} hours)"
+            f"Starting main loop - monitoring for new verified tokens (last {TOKEN_AGE} minutes)"
         )
 
         # Get wait times from environment
@@ -862,10 +943,16 @@ async def main(auto=False):
                 if os.getenv("ENABLE_JUPITER", "false").lower() == "true":
                     jupiter_tokens = fetch_verified_tokens()
                     all_tokens.extend(jupiter_tokens)
-
+                    #print(f"Jupiter tokens: {jupiter_tokens}")
                 if os.getenv("ENABLE_PUMP", "true").lower() == "true":
-                    pump_tokens = fetch_pump_tokens()
-                    all_tokens.extend(pump_tokens)
+                    bitquery_tokens = fetch_from_bitquery()
+                    all_tokens.extend(bitquery_tokens)
+                    #print(f"Bitquery tokens: {bitquery_tokens}")
+
+                if os.getenv("ENABLE_SOLWATCH", "true").lower() == "true":
+                    solwatch_tokens = fetch_solwatch_tokens()
+                    all_tokens.extend(solwatch_tokens)
+                    #print(f"SolWatch tokens: {solwatch_tokens}")
 
                 if all_tokens:
                     new_verified_tokens, status_changes = process_tokens(all_tokens)
@@ -878,16 +965,17 @@ async def main(auto=False):
                             )
 
                     # Get tokens that need processing (new or retry)
-                    conn = sqlite3.connect("tokens.db")
+                    conn = sqlite3.connect(TOKENS_DB)
                     cursor = conn.cursor()
 
+                    max_retries = int(os.getenv("MAX_TOKEN_RETRIES", "3"))
                     cursor.execute("""
                     SELECT mint, retry_count 
                     FROM verified_tokens 
                     WHERE is_bought = FALSE 
-                    AND retry_count < 3 
+                    AND retry_count < ?
                     ORDER BY date_added ASC
-                    """)
+                    """, (max_retries,))
 
                     tokens_to_process = cursor.fetchall()
                     conn.close()
@@ -896,9 +984,31 @@ async def main(auto=False):
                     for mint, retry_count in tokens_to_process:
                         current_mint = mint
                         logger.info(
-                            f"Processing token (attempt {retry_count + 1}/3): {mint}"
+                            f"Processing token (attempt {retry_count + 1}/{max_retries}): {mint}"
                         )
-                        await client.send_message("solana_trojanbot", mint)
+                        
+                        # Send token to bot
+                        await client.send_message(os.getenv("BOT_TG_HANDLE"), mint)
+                        log_communication(mint, "sent", mint)
+                        
+                        # Immediately increment retry count
+                        conn = sqlite3.connect(TOKENS_DB)
+                        cursor = conn.cursor()
+                        current_time = datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
+                        
+                        cursor.execute(
+                            """
+                            UPDATE verified_tokens 
+                            SET retry_count = retry_count + 1,
+                                last_attempt = ?
+                            WHERE mint = ? AND is_bought = FALSE
+                            """,
+                            (current_time, mint),
+                        )
+                        conn.commit()
+                        conn.close()
+                        
+                        # Wait before processing next token
                         await asyncio.sleep(retry_wait)
 
                 current_mint = None

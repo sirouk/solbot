@@ -79,6 +79,23 @@ On first run, the bot will guide you through setting up your `.env` file. You'll
 
 The bot will create a `.env` file with this information.
 
+
+## Running the SolWatch
+The SolWatch is a separate service that monitors the Solana blockchain for new tokens and saves them to a SQLite database. The SolBot will use this database to track tokens and purchase them.
+
+### Setting up PM2 Service for SolWatch
+
+Set up the SolWatch as a PM2 service:
+
+```bash
+# Start the SolWatch with PM2
+pm2 start sol_ws.py --name SolWatch --interpreter python3
+
+# Ensure PM2 starts on system boot
+pm2 startup && pm2 save --force
+```
+
+
 ## Running the SolBot
 
 First, run manually to verify everything is working:
@@ -89,7 +106,7 @@ source .venv/bin/activate
 python3 main.py
 ```
 
-### Setting up PM2 Service
+### Setting up PM2 Service for SolBot
 
 Once verified, set up the SolBot as a PM2 service:
 
