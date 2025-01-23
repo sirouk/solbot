@@ -45,7 +45,8 @@ def create_database():
     cursor = conn.cursor()
 
     # Create tokens table
-    cursor.execute("""
+    cursor.execute(
+        """
     CREATE TABLE IF NOT EXISTS verified_tokens (
         mint TEXT PRIMARY KEY,
         name TEXT,
@@ -58,10 +59,12 @@ def create_database():
         retry_count INTEGER DEFAULT 0,
         last_attempt TIMESTAMP NULL
     )
-    """)
+    """
+    )
 
     # Create communications table
-    cursor.execute("""
+    cursor.execute(
+        """
     CREATE TABLE IF NOT EXISTS bot_communications (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         mint TEXT,
@@ -72,7 +75,8 @@ def create_database():
         was_successful BOOLEAN DEFAULT FALSE,
         FOREIGN KEY (mint) REFERENCES verified_tokens(mint)
     )
-    """)
+    """
+    )
 
     conn.commit()
     conn.close()
@@ -328,11 +332,11 @@ def fetch_solwatch_tokens():
         selection_mode = os.getenv("TOKEN_SELECTION_MODE", "pump").lower()
         cutoff_time = datetime.now(pytz.UTC) - timedelta(minutes=token_age_minutes)
         cutoff_time_str = cutoff_time.strftime("%Y-%m-%d %H:%M:%S.%f")
-        
+
         # Connect to SolWatch database in read-only mode
         solwatch_db = sqlite3.connect(f"file:{TOKEN_WATCH_DB}?mode=ro", uri=True)
         cursor = solwatch_db.cursor()
-        
+
         # Build WHERE clause based on selection mode
         pump_filter = ""
         if selection_mode == "pump":
@@ -340,7 +344,7 @@ def fetch_solwatch_tokens():
         elif selection_mode == "non-pump":
             pump_filter = "AND is_pump_token = FALSE"
         # For "all" mode, we don't add any pump filter
-        
+
         query = f"""
             SELECT 
                 mint_address,
@@ -355,50 +359,70 @@ def fetch_solwatch_tokens():
             AND has_freeze_authority = FALSE 
             AND last_updated_time > ?
             {pump_filter}
+            -- Holder metrics criteria
+            AND total_holders >= 50                    -- At least 10 holders to show interest
+            -- AND total_holders <= 20                   -- But not too many (still early)
+            -- AND holder_ratio >= 0.02                    -- At least 30% held by non-dev wallets
+            -- AND top_holder_percentage <= 0.95           -- Top holder owns max 50%
+            -- AND top5_holders_percentage <= 0.98         -- Top 5 holders own max 80%
+            AND lp_holders_count >= 1                  -- At least 1 LP holder
+            AND last_holder_check IS NOT NULL         -- Ensure we have holder metrics
             ORDER BY last_updated_time DESC
         """
-        
+
         print(f"\nExecuting query on {TOKEN_WATCH_DB}:")
         print(f"Using cutoff time: {cutoff_time_str}")
         print(f"Selection mode: {selection_mode}")
-        
+
         cursor.execute(query, (cutoff_time_str,))
-        
+
         tokens = []
         for row in cursor.fetchall():
-            mint_address, raw_supply, actual_supply, decimals, first_seen_slot, last_updated, is_pump_token = row
+            (
+                mint_address,
+                raw_supply,
+                actual_supply,
+                decimals,
+                first_seen_slot,
+                last_updated,
+                is_pump_token,
+            ) = row
             # Parse timestamp and make it timezone-aware
-            created_time = datetime.strptime(last_updated, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=pytz.UTC)
-            
-            tokens.append({
-                'mint': mint_address,
-                'name': '',
-                'symbol': '',
-                'description': f'Supply: {actual_supply:,.2f}, Decimals: {decimals}',
-                'jup_verified': False,
-                'created_at': created_time,  # Now timezone-aware
-                'minted_at': created_time,   # Now timezone-aware
-                'daily_volume': None,
-                'has_mint_authority': False,  # Add these fields since we already filtered for them
-                'has_freeze_authority': False,  # in the SQL query
-                'notification_msg': (
-                    f"🔍 SolWatch Token Found!\n"
-                    f"Address: {mint_address}\n"
-                    f"Supply: {actual_supply:,.2f}\n"
-                    f"Decimals: {decimals}\n"
-                    f"First seen slot: {first_seen_slot}\n"
-                    f"Last updated: {last_updated}\n"
-                    f"✅ SAFETY CHECKS:\n"
-                    f"  - Contains 'pump': {'✅' if is_pump_token else '❌'}\n"
-                    f"  - No mint authority: ✅\n"
-                    f"  - No freeze authority: ✅"
-                )
-            })
-        
+            created_time = datetime.strptime(
+                last_updated, "%Y-%m-%d %H:%M:%S.%f"
+            ).replace(tzinfo=pytz.UTC)
+
+            tokens.append(
+                {
+                    "mint": mint_address,
+                    "name": "",
+                    "symbol": "",
+                    "description": f"Supply: {actual_supply:,.2f}, Decimals: {decimals}",
+                    "jup_verified": False,
+                    "created_at": created_time,  # Now timezone-aware
+                    "minted_at": created_time,  # Now timezone-aware
+                    "daily_volume": None,
+                    "has_mint_authority": False,  # Add these fields since we already filtered for them
+                    "has_freeze_authority": False,  # in the SQL query
+                    "notification_msg": (
+                        f"🔍 SolWatch Token Found!\n"
+                        f"Address: {mint_address}\n"
+                        f"Supply: {actual_supply:,.2f}\n"
+                        f"Decimals: {decimals}\n"
+                        f"First seen slot: {first_seen_slot}\n"
+                        f"Last updated: {last_updated}\n"
+                        f"✅ SAFETY CHECKS:\n"
+                        f"  - Contains 'pump': {'✅' if is_pump_token else '❌'}\n"
+                        f"  - No mint authority: ✅\n"
+                        f"  - No freeze authority: ✅"
+                    ),
+                }
+            )
+
         solwatch_db.close()
         logger.info(f"Fetched {len(tokens)} qualifying tokens from SolWatch")
         return tokens
-        
+
     except Exception as e:
         logger.error(f"Error fetching SolWatch tokens: {e}")
         return []
@@ -432,9 +456,9 @@ def process_tokens(tokens):
     # Clean up old tokens that were never bought
     # cursor.execute(
     #     """
-    # DELETE FROM verified_tokens 
-    # WHERE is_bought = FALSE 
-    # AND date_added < ? 
+    # DELETE FROM verified_tokens
+    # WHERE is_bought = FALSE
+    # AND date_added < ?
     # AND retry_count >= ?
     # """,
     #     (cutoff_time_str, max_retries),
@@ -443,7 +467,9 @@ def process_tokens(tokens):
     for token in tokens:
         mint = token["mint"]
         is_verified = token.get("jup_verified", False)
-        created_at = token["created_at"]  # Should already be timezone-aware from fetch_solwatch_tokens
+        created_at = token[
+            "created_at"
+        ]  # Should already be timezone-aware from fetch_solwatch_tokens
 
         # Check if token matches the selection mode
         has_pump = mint.endswith("pump")
@@ -703,10 +729,14 @@ def setup_environment(auto=False):
     print("1. pump    - Only process tokens with 'pump' in the name")
     print("2. non-pump - Only process tokens without 'pump' in the name")
     print("3. all     - Process all tokens regardless of name")
-    
-    selection_mode_prompt = f" [current: {current_selection_mode}]: " if current_selection_mode else ": "
+
+    selection_mode_prompt = (
+        f" [current: {current_selection_mode}]: " if current_selection_mode else ": "
+    )
     while True:
-        mode = input(f"Enter token selection mode{selection_mode_prompt}").strip().lower()
+        mode = (
+            input(f"Enter token selection mode{selection_mode_prompt}").strip().lower()
+        )
         if not mode and current_selection_mode:
             mode = current_selection_mode
             break
@@ -765,8 +795,16 @@ def setup_environment(auto=False):
 
     while True:
         try:
-            solwatch_prompt = f" [current: {os.getenv('ENABLE_SOLWATCH', 'true')}]: " if os.getenv('ENABLE_SOLWATCH') else " (default: true): "
-            solwatch_input = input(f"\nEnable SolWatch tokens? (true/false){solwatch_prompt}").strip().lower()
+            solwatch_prompt = (
+                f" [current: {os.getenv('ENABLE_SOLWATCH', 'true')}]: "
+                if os.getenv("ENABLE_SOLWATCH")
+                else " (default: true): "
+            )
+            solwatch_input = (
+                input(f"\nEnable SolWatch tokens? (true/false){solwatch_prompt}")
+                .strip()
+                .lower()
+            )
             if not solwatch_input:
                 enable_solwatch = os.getenv("ENABLE_SOLWATCH", "true")
                 break
@@ -923,7 +961,7 @@ async def main(auto=False):
         )
 
         # Get wait times from environment
-        base_wait = float(os.getenv("WAIT_SECONDS", "5"))
+        base_wait = float(os.getenv("WAIT_SECONDS", "1"))
         retry_wait = base_wait * 2
 
         while True:
@@ -934,16 +972,16 @@ async def main(auto=False):
                 if os.getenv("ENABLE_JUPITER", "false").lower() == "true":
                     jupiter_tokens = fetch_verified_tokens()
                     all_tokens.extend(jupiter_tokens)
-                    #print(f"Jupiter tokens: {jupiter_tokens}")
+                    # print(f"Jupiter tokens: {jupiter_tokens}")
                 if os.getenv("ENABLE_PUMP", "true").lower() == "true":
                     bitquery_tokens = fetch_from_bitquery()
                     all_tokens.extend(bitquery_tokens)
-                    #print(f"Bitquery tokens: {bitquery_tokens}")
+                    # print(f"Bitquery tokens: {bitquery_tokens}")
 
                 if os.getenv("ENABLE_SOLWATCH", "true").lower() == "true":
                     solwatch_tokens = fetch_solwatch_tokens()
                     all_tokens.extend(solwatch_tokens)
-                    #print(f"SolWatch tokens: {solwatch_tokens}")
+                    # print(f"SolWatch tokens: {solwatch_tokens}")
 
                 if all_tokens:
                     new_verified_tokens, status_changes = process_tokens(all_tokens)
@@ -960,13 +998,16 @@ async def main(auto=False):
                     cursor = conn.cursor()
 
                     max_retries = int(os.getenv("MAX_TOKEN_RETRIES", "3"))
-                    cursor.execute("""
+                    cursor.execute(
+                        """
                     SELECT mint, retry_count 
                     FROM verified_tokens 
                     WHERE is_bought = FALSE 
                     AND retry_count < ?
                     ORDER BY date_added ASC
-                    """, (max_retries,))
+                    """,
+                        (max_retries,),
+                    )
 
                     tokens_to_process = cursor.fetchall()
                     conn.close()
@@ -977,16 +1018,18 @@ async def main(auto=False):
                         logger.info(
                             f"Processing token (attempt {retry_count + 1}/{max_retries}): {mint}"
                         )
-                        
+
                         # Send token to bot
                         await client.send_message(os.getenv("BOT_TG_HANDLE"), mint)
                         log_communication(mint, "sent", mint)
-                        
+
                         # Immediately increment retry count
                         conn = sqlite3.connect(TOKENS_DB)
                         cursor = conn.cursor()
-                        current_time = datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
-                        
+                        current_time = datetime.now(pytz.UTC).strftime(
+                            "%Y-%m-%d %H:%M:%S.%f"
+                        )
+
                         cursor.execute(
                             """
                             UPDATE verified_tokens 
@@ -998,7 +1041,7 @@ async def main(auto=False):
                         )
                         conn.commit()
                         conn.close()
-                        
+
                         # Wait before processing next token
                         await asyncio.sleep(retry_wait)
 

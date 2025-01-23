@@ -96,6 +96,19 @@ pm2 startup && pm2 save --force
 ```
 
 
+### Setting up PM2 Service for SolScanner
+
+Set up the SolScanner as a PM2 service:
+
+```bash
+# Start the SolScanner with PM2
+pm2 start holder_metrics.py --name SolScanner --interpreter python3
+
+# Ensure PM2 starts on system boot
+pm2 startup && pm2 save --force
+```
+
+
 ## Running the SolBot
 
 First, run manually to verify everything is working:
