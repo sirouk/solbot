@@ -20,7 +20,9 @@ SOLANA_MAINNET_HTTP = os.getenv(
 )
 DB_FILE = "token_watch.db"
 TOKEN_PROGRAM_ID = os.getenv(
-    "TOKEN_PROGRAM_ID", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    # "TOKEN_PROGRAM_ID", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    "TOKEN_PROGRAM_ID",
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",  # Raydium
 )
 MIN_SUPPLY = float(os.getenv("MIN_SUPPLY", "10000"))  # Default to 10,000 if not set
 INITIALIZE_MINT_IX = (
