@@ -365,8 +365,8 @@ def fetch_solwatch_tokens():
             -- AND holder_ratio >= 0.02                    -- At least 30% held by non-dev wallets
             -- AND top_holder_percentage <= 0.95           -- Top holder owns max 50%
             -- AND top5_holders_percentage <= 0.98         -- Top 5 holders own max 80%
-            AND lp_holders_count >= 1                  -- At least 1 LP holder
-            AND last_holder_check IS NOT NULL         -- Ensure we have holder metrics
+            -- AND lp_holders_count >= 1                  -- At least 1 LP holder
+            -- AND last_holder_check IS NOT NULL         -- Ensure we have holder metrics
             ORDER BY last_updated_time DESC
         """
 
