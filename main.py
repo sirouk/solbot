@@ -330,7 +330,11 @@ def fetch_solwatch_tokens():
         print("Fetching tokens from SolWatch database...")
         token_age_minutes = float(os.getenv("TOKEN_AGE_MINUTES", "1"))
         selection_mode = os.getenv("TOKEN_SELECTION_MODE", "pump").lower()
-        cutoff_time = datetime.now(pytz.UTC) - timedelta(minutes=token_age_minutes)
+
+        # Get current time in UTC
+        current_time = datetime.now(pytz.UTC)
+        current_time_str = current_time.strftime("%Y-%m-%d %H:%M:%S.%f")
+        cutoff_time = current_time - timedelta(minutes=token_age_minutes)
         cutoff_time_str = cutoff_time.strftime("%Y-%m-%d %H:%M:%S.%f")
 
         # Connect to SolWatch database in read-only mode
@@ -352,29 +356,30 @@ def fetch_solwatch_tokens():
                 actual_supply,
                 decimals,
                 first_seen_slot,
-                last_updated_time,
+                first_seen_time,
                 is_pump_token
             FROM tokens 
             WHERE has_mint_authority = FALSE 
             AND has_freeze_authority = FALSE 
-            AND last_updated_time > ?
+            AND first_seen_time <= ?  -- Current time
+            AND first_seen_time > ?   -- Cutoff time
             {pump_filter}
             -- Holder metrics criteria
-            AND total_holders >= 50                    -- At least 10 holders to show interest
+            AND total_holders >= 100                    -- At least 10 holders to show interest
             -- AND total_holders <= 20                   -- But not too many (still early)
             -- AND holder_ratio >= 0.02                    -- At least 30% held by non-dev wallets
             -- AND top_holder_percentage <= 0.95           -- Top holder owns max 50%
             -- AND top5_holders_percentage <= 0.98         -- Top 5 holders own max 80%
             -- AND lp_holders_count >= 1                  -- At least 1 LP holder
             -- AND last_holder_check IS NOT NULL         -- Ensure we have holder metrics
-            ORDER BY last_updated_time DESC
+            ORDER BY first_seen_time DESC
         """
 
         print(f"\nExecuting query on {TOKEN_WATCH_DB}:")
-        print(f"Using cutoff time: {cutoff_time_str}")
+        print(f"Using time window: {cutoff_time_str} to {current_time_str}")
         print(f"Selection mode: {selection_mode}")
 
-        cursor.execute(query, (cutoff_time_str,))
+        cursor.execute(query, (current_time_str, cutoff_time_str))
 
         tokens = []
         for row in cursor.fetchall():
@@ -384,12 +389,12 @@ def fetch_solwatch_tokens():
                 actual_supply,
                 decimals,
                 first_seen_slot,
-                last_updated,
+                first_seen_time,
                 is_pump_token,
             ) = row
             # Parse timestamp and make it timezone-aware
             created_time = datetime.strptime(
-                last_updated, "%Y-%m-%d %H:%M:%S.%f"
+                first_seen_time, "%Y-%m-%d %H:%M:%S.%f"
             ).replace(tzinfo=pytz.UTC)
 
             tokens.append(
@@ -410,7 +415,7 @@ def fetch_solwatch_tokens():
                         f"Supply: {actual_supply:,.2f}\n"
                         f"Decimals: {decimals}\n"
                         f"First seen slot: {first_seen_slot}\n"
-                        f"Last updated: {last_updated}\n"
+                        f"First seen time: {first_seen_time}\n"
                         f"✅ SAFETY CHECKS:\n"
                         f"  - Contains 'pump': {'✅' if is_pump_token else '❌'}\n"
                         f"  - No mint authority: ✅\n"

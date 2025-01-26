@@ -76,6 +76,7 @@ def init_db():
                   is_pump_token BOOLEAN,
                   first_seen_slot INTEGER,
                   last_updated_slot INTEGER,
+                  first_seen_time TIMESTAMP,
                   last_updated_time TIMESTAMP,
                   total_holders INTEGER DEFAULT 0,
                   top_holder_percentage REAL DEFAULT 0.0,
@@ -110,26 +111,58 @@ def save_token_to_db(token_data):
 
         current_time = datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
 
+        # Check if token already exists
         c.execute(
-            """INSERT OR REPLACE INTO tokens 
-                    (mint_address, owner, raw_supply, actual_supply, decimals,
-                     has_mint_authority, has_freeze_authority, is_pump_token,
-                     first_seen_slot, last_updated_slot, last_updated_time)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                token_data["mint_address"],
-                token_data["owner"],
-                token_data["raw_supply"],
-                token_data["actual_supply"],
-                token_data["decimals"],
-                token_data["has_mint_authority"],
-                token_data["has_freeze_authority"],
-                token_data["is_pump_token"],
-                token_data["first_seen_slot"],
-                token_data["last_updated_slot"],
-                current_time,
-            ),
+            "SELECT first_seen_time FROM tokens WHERE mint_address = ?",
+            (token_data["mint_address"],),
         )
+        result = c.fetchone()
+
+        if result is None:
+            # New token - set both timestamps
+            c.execute(
+                """INSERT INTO tokens 
+                        (mint_address, owner, raw_supply, actual_supply, decimals,
+                         has_mint_authority, has_freeze_authority, is_pump_token,
+                         first_seen_slot, last_updated_slot, first_seen_time, last_updated_time)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    token_data["mint_address"],
+                    token_data["owner"],
+                    token_data["raw_supply"],
+                    token_data["actual_supply"],
+                    token_data["decimals"],
+                    token_data["has_mint_authority"],
+                    token_data["has_freeze_authority"],
+                    token_data["is_pump_token"],
+                    token_data["first_seen_slot"],
+                    token_data["last_updated_slot"],
+                    current_time,  # first_seen_time
+                    current_time,  # last_updated_time
+                ),
+            )
+        else:
+            # Existing token - only update last_updated_time
+            c.execute(
+                """UPDATE tokens 
+                   SET owner = ?, raw_supply = ?, actual_supply = ?, decimals = ?,
+                       has_mint_authority = ?, has_freeze_authority = ?, is_pump_token = ?,
+                       first_seen_slot = ?, last_updated_slot = ?, last_updated_time = ?
+                   WHERE mint_address = ?""",
+                (
+                    token_data["owner"],
+                    token_data["raw_supply"],
+                    token_data["actual_supply"],
+                    token_data["decimals"],
+                    token_data["has_mint_authority"],
+                    token_data["has_freeze_authority"],
+                    token_data["is_pump_token"],
+                    token_data["first_seen_slot"],
+                    token_data["last_updated_slot"],
+                    current_time,  # last_updated_time
+                    token_data["mint_address"],
+                ),
+            )
 
         conn.commit()
         conn.close()
